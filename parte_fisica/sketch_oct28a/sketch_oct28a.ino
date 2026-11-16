@@ -1,135 +1,178 @@
 
-/*
-  Sensor LCUP + ESP32-C6
-  Estimativa experimental de BPM
-*/
+#include <Wire.h>
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include "DFRobot_BloodOxygen_S.h"
 
-const int SENSOR_PIN = 0;
+// ---------------- SENSOR ----------------
 
-const unsigned long MIN_INTERVAL = 300;
-const unsigned long MAX_INTERVAL = 1500;
+#define I2C_COMMUNICATION
+#define I2C_ADDRESS 0x57
 
-float linhaBase = 0;
-float sinalFiltrado = 0;
-float amplitude = 0;
+DFRobot_BloodOxygen_S_I2C sensor(&Wire, I2C_ADDRESS);
 
-bool iniciado = false;
-bool acima = false;
+// ---------------- WIFI ----------------
 
-unsigned long ultimoPico = 0;
-unsigned long ultimaSaida = 0;
+const char* WIFI_SSID = "BELCHIOR";
+const char* WIFI_PASSWORD = "rodrigoerita0";
 
-unsigned long intervalos[5];
-int numeroIntervalos = 0;
-int indiceIntervalo = 0;
+// ---------------- BACKEND ----------------
 
-int bpm = 0;
-int ultimoADC = 0;
+// Substitui pelo IP local do computador onde corre o IntelliJ
+const char* SERVER_URL =
+  "http://192.168.68.54:8080/api/measurements";
 
-void setup() {
-  Serial.begin(115200);
-  analogReadResolution(12);
-  delay(1000);
+const char* DEVICE_ID = "EASYTRACK-001";
 
-  Serial.println("LCUP - ESP32-C6");
-  Serial.println("Coloca o dedo e mantem-no imovel.");
-}
+// ---------------- MEDICOES ----------------
 
-void loop() {
-  unsigned long agora = millis();
-  int adc = analogRead(SENSOR_PIN);
+int ultimaFC = -1;
+int ultimoSpO2 = -1;
 
-  if (!iniciado) {
-    linhaBase = adc;
-    ultimoADC = adc;
-    iniciado = true;
+// ---------------- WIFI ----------------
+
+void ligarWiFi() {
+  Serial.println("A ligar ao Wi-Fi...");
+
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+
+  int tentativas = 0;
+
+  while (WiFi.status() != WL_CONNECTED && tentativas < 30) {
+    delay(500);
+    Serial.print(".");
+    tentativas++;
   }
 
-  // Rejeita alteracoes bruscas causadas por movimento
-  if (abs(adc - ultimoADC) > 350) {
-    linhaBase = adc;
-    sinalFiltrado = 0;
-    amplitude = 0;
-    acima = false;
-    ultimoPico = 0;
-    numeroIntervalos = 0;
-    bpm = 0;
-    ultimoADC = adc;
-    delay(5);
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\nWi-Fi ligado!");
+    Serial.print("IP do ESP32: ");
+    Serial.println(WiFi.localIP());
+  } else {
+    Serial.println("\nNao foi possivel ligar ao Wi-Fi.");
+  }
+}
+
+// ---------------- ENVIAR DADOS ----------------
+
+void enviarMedicao(int fc, int spo2) {
+
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("Wi-Fi desligado. A tentar ligar...");
+    ligarWiFi();
+  }
+
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("Medicao nao enviada.");
     return;
   }
 
-  ultimoADC = adc;
+  WiFiClient client;
+  HTTPClient http;
 
-  // Remove a componente lenta
-  linhaBase = 0.99 * linhaBase + 0.01 * adc;
-  float sinal = adc - linhaBase;
+  http.begin(client, SERVER_URL);
+  http.addHeader("Content-Type", "application/json");
 
-  // Filtro do sinal
-  sinalFiltrado = 0.8 * sinalFiltrado + 0.2 * sinal;
+  String json = "{";
+  json += "\"deviceId\":\"" + String(DEVICE_ID) + "\",";
+  json += "\"heartRate\":" + String(fc) + ",";
+  json += "\"spo2\":" + String(spo2);
+  json += "}";
 
-  // Amplitude adaptativa
-  amplitude = 0.98 * amplitude +
-              0.02 * abs((int)sinalFiltrado);
+  Serial.println("A enviar medicao...");
+  Serial.println(json);
 
-  float limiar = max(8.0f, amplitude * 0.7f);
+  int resposta = http.POST(json);
 
-  // Deteta uma subida acima do limiar
-  if (!acima && sinalFiltrado > limiar) {
-    acima = true;
+  if (resposta > 0) {
+    Serial.print("Resposta do servidor: ");
+    Serial.println(resposta);
 
-    if (ultimoPico != 0) {
-      unsigned long intervalo = agora - ultimoPico;
+    Serial.println(http.getString());
 
-      if (intervalo >= MIN_INTERVAL &&
-          intervalo <= MAX_INTERVAL) {
-
-        intervalos[indiceIntervalo] = intervalo;
-        indiceIntervalo = (indiceIntervalo + 1) % 5;
-
-        if (numeroIntervalos < 5) {
-          numeroIntervalos++;
-        }
-
-        // Só calcula quando há pelo menos 3 intervalos
-        if (numeroIntervalos >= 3) {
-          unsigned long soma = 0;
-
-          for (int i = 0; i < numeroIntervalos; i++) {
-            soma += intervalos[i];
-          }
-
-          unsigned long mediaIntervalo = soma / numeroIntervalos;
-          bpm = 60000 / mediaIntervalo;
-        }
-      }
-    }
-
-    ultimoPico = agora;
-  }
-
-  if (sinalFiltrado < limiar * 0.25f) {
-    acima = false;
-  }
-
-  if (agora - ultimaSaida >= 1000) {
-    ultimaSaida = agora;
-
-    Serial.print("ADC=");
-    Serial.print(adc);
-    Serial.print(" | Sinal=");
-    Serial.print(sinalFiltrado, 1);
-    Serial.print(" | BPM=");
-
-    if (ultimoPico == 0 || agora - ultimoPico > 2500) {
-      Serial.println("--");
-      bpm = 0;
-    } else if (numeroIntervalos >= 3) {
-      Serial.println(bpm);
+    if (resposta >= 200 && resposta < 300) {
+      Serial.println("Medicao guardada com sucesso!");
     } else {
-      Serial.println("a estabilizar");
+      Serial.println("Erro ao guardar a medicao.");
     }
+  } else {
+    Serial.print("Erro HTTP: ");
+    Serial.println(http.errorToString(resposta));
   }
 
-  delay(5);
+  http.end();
+}
+
+// ---------------- SETUP ----------------
+
+void setup() {
+
+  Serial.begin(115200);
+  delay(1000);
+
+  Wire.begin(D4, D5);
+
+  Serial.println("A iniciar SEN0344...");
+
+  while (!sensor.begin()) {
+    Serial.println("Sensor nao encontrado!");
+    delay(2000);
+  }
+
+  Serial.println("Sensor iniciado!");
+
+  sensor.sensorStartCollect();
+
+  ligarWiFi();
+
+  Serial.println("Coloca o dedo e mantem-no imovel.");
+
+  delay(4000);
+}
+
+// ---------------- LOOP ----------------
+
+void loop() {
+
+  sensor.getHeartbeatSPO2();
+
+  int fc = sensor._sHeartbeatSPO2.Heartbeat;
+  int spo2 = sensor._sHeartbeatSPO2.SPO2;
+
+  Serial.println("\n--- MEDICAO ---");
+
+  bool fcValida = (fc > 0 && fc <= 220);
+  bool spo2Valido = (spo2 >= 70 && spo2 <= 100);
+
+  if (fcValida) {
+    ultimaFC = fc;
+
+    Serial.print("Frequencia cardiaca: ");
+    Serial.print(fc);
+    Serial.println(" BPM");
+  } else {
+    Serial.println("Frequencia cardiaca: Sem leitura valida");
+  }
+
+  if (spo2Valido) {
+    ultimoSpO2 = spo2;
+
+    Serial.print("SpO2: ");
+    Serial.print(spo2);
+    Serial.println(" %");
+  } else {
+    Serial.println("SpO2: Sem leitura valida");
+  }
+
+  Serial.println("---------------");
+
+  // Só envia quando ambos os valores são válidos
+  if (fcValida && spo2Valido) {
+    enviarMedicao(fc, spo2);
+  } else {
+    Serial.println("Medicao nao enviada: valores invalidos.");
+  }
+
+  delay(4000);
 }
