@@ -11,6 +11,17 @@
 
 DFRobot_BloodOxygen_S_I2C sensor(&Wire, I2C_ADDRESS);
 
+// ---------------- LED RGB ----------------
+
+// Pinos do LED RGB
+#define LED_R D0
+#define LED_G D1
+#define LED_B D2
+
+// Limites de frequencia cardiaca (demonstracao)
+#define FC_NORMAL 100
+#define FC_ELEVADA 150
+
 // ---------------- WIFI ----------------
 
 const char* WIFI_SSID = "BELCHIOR";
@@ -18,9 +29,8 @@ const char* WIFI_PASSWORD = "rodrigoerita0";
 
 // ---------------- BACKEND ----------------
 
-// Substitui pelo IP local do computador onde corre o IntelliJ
 const char* SERVER_URL =
-  "http://192.168.68.54:8080/api/measurements";
+  "http://192.168.68.52:8080/api/measurements";
 
 const char* DEVICE_ID = "EASYTRACK-001";
 
@@ -29,7 +39,52 @@ const char* DEVICE_ID = "EASYTRACK-001";
 int ultimaFC = -1;
 int ultimoSpO2 = -1;
 
-// ---------------- WIFI ----------------
+
+// ---------------- CONTROLO LED ----------------
+
+void desligarLED() {
+  digitalWrite(LED_R, LOW);
+  digitalWrite(LED_G, LOW);
+  digitalWrite(LED_B, LOW);
+}
+
+void atualizarLED(int fc) {
+
+  if (fc <= 0 || fc > 220) {
+    desligarLED();
+    Serial.println("LED: Apagado - sem leitura valida");
+  }
+
+  else if (fc < FC_NORMAL) {
+    // Verde: frequencia normal
+    digitalWrite(LED_R, LOW);
+    digitalWrite(LED_G, HIGH);
+    digitalWrite(LED_B, LOW);
+
+    Serial.println("LED: VERDE - Frequencia normal");
+  }
+
+  else if (fc <= FC_ELEVADA) {
+    // Amarelo: vermelho + verde
+    digitalWrite(LED_R, HIGH);
+    digitalWrite(LED_G, HIGH);
+    digitalWrite(LED_B, LOW);
+
+    Serial.println("LED: AMARELO - Frequencia elevada");
+  }
+
+  else {
+    // Vermelho: frequencia muito elevada
+    digitalWrite(LED_R, HIGH);
+    digitalWrite(LED_G, LOW);
+    digitalWrite(LED_B, LOW);
+
+    Serial.println("LED: VERMELHO - Frequencia acima do limite");
+  }
+}
+
+
+// ---------------- LIGAR WIFI ----------------
 
 void ligarWiFi() {
   Serial.println("A ligar ao Wi-Fi...");
@@ -53,6 +108,7 @@ void ligarWiFi() {
     Serial.println("\nNao foi possivel ligar ao Wi-Fi.");
   }
 }
+
 
 // ---------------- ENVIAR DADOS ----------------
 
@@ -104,6 +160,7 @@ void enviarMedicao(int fc, int spo2) {
   http.end();
 }
 
+
 // ---------------- SETUP ----------------
 
 void setup() {
@@ -111,6 +168,16 @@ void setup() {
   Serial.begin(115200);
   delay(1000);
 
+  // Inicializar LED RGB
+  pinMode(LED_R, OUTPUT);
+  pinMode(LED_G, OUTPUT);
+  pinMode(LED_B, OUTPUT);
+
+  desligarLED();
+
+  Serial.println("LED RGB iniciado!");
+
+  // Inicializar comunicacao I2C
   Wire.begin(D4, D5);
 
   Serial.println("A iniciar SEN0344...");
@@ -131,6 +198,7 @@ void setup() {
   delay(4000);
 }
 
+
 // ---------------- LOOP ----------------
 
 void loop() {
@@ -145,15 +213,25 @@ void loop() {
   bool fcValida = (fc > 0 && fc <= 220);
   bool spo2Valido = (spo2 >= 70 && spo2 <= 100);
 
+  // -------- FREQUENCIA CARDIACA --------
+
   if (fcValida) {
     ultimaFC = fc;
 
     Serial.print("Frequencia cardiaca: ");
     Serial.print(fc);
     Serial.println(" BPM");
+
+    // Atualizar LED de acordo com a FC
+    atualizarLED(fc);
+
   } else {
     Serial.println("Frequencia cardiaca: Sem leitura valida");
+
+    desligarLED();
   }
+
+  // -------- SPO2 --------
 
   if (spo2Valido) {
     ultimoSpO2 = spo2;
@@ -167,7 +245,7 @@ void loop() {
 
   Serial.println("---------------");
 
-  // Só envia quando ambos os valores são válidos
+  // Enviar apenas quando ambos os valores sao validos
   if (fcValida && spo2Valido) {
     enviarMedicao(fc, spo2);
   } else {
